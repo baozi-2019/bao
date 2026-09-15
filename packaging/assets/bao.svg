@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- 包子图标：蒸笼暖色底 + 奶油色包子，顶部螺旋褶皱 -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFAB54"/>
+      <stop offset="1" stop-color="#EE7F2E"/>
+    </linearGradient>
+    <linearGradient id="bun" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFDF7"/>
+      <stop offset="1" stop-color="#F3E3C6"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="url(#bg)"/>
+
+  <!-- 包子主体：顶部隆起的半球，底部微鼓 -->
+  <path d="M 26 90 C 28 56 44 38 64 38 C 84 38 100 56 102 90 C 102 98 84 106 64 106 C 44 106 26 98 26 90 Z" fill="url(#bun)"/>
+  <!-- 底部暗面 -->
+  <path d="M 26 90 C 26 98 44 106 64 106 C 84 106 102 98 102 90 C 96 99 82 102 64 102 C 46 102 32 99 26 90 Z" fill="#E7D0AA" opacity="0.8"/>
+
+  <!-- 顶部螺旋褶皱 -->
+  <g stroke="#DEC49A" stroke-width="3" fill="none" stroke-linecap="round">
+    <path d="M 64 46 c -5 3 -6 8 -3 11 c 3 3 9 2 10 -2 c 1 -5 -3 -8 -8 -8 c -6 0 -10 4 -10 10"/>
+    <path d="M 64 42 c -9 2 -14 9 -12 16"/>
+    <path d="M 64 42 c 9 2 14 9 12 16"/>
+  </g>
+
+  <!-- 放射状褶纹 -->
+  <g stroke="#EAD6B4" stroke-width="3" fill="none" stroke-linecap="round">
+    <path d="M 52 58 C 46 66 40 72 34 76"/>
+    <path d="M 58 64 C 55 72 51 78 47 82"/>
+    <path d="M 76 58 C 82 66 88 72 94 76"/>
+    <path d="M 70 64 C 73 72 77 78 81 82"/>
+  </g>
+
+  <!-- 高光 -->
+  <ellipse cx="46" cy="56" rx="11" ry="6" fill="#FFFFFF" opacity="0.55"/>
+</svg>

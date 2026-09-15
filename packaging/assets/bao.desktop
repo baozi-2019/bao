@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=bao
+GenericName=应用启动器
+Comment=Albert 风格的 GTK4 桌面启动器：应用/文件搜索 + 计算器
+Exec=bao
+Icon=bao
+Terminal=false
+Categories=Utility;
+Keywords=launcher;search;spotlight;启动器;搜索;
+StartupNotify=true

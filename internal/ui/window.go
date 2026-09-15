@@ -5,6 +5,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"os"
 	"os/exec"
@@ -139,7 +140,7 @@ const (
 	escClosePopup escAction = iota // 关候选下拉（文本不动）
 	escClearText                   // 清文本，停留当前模式（药丸仍在）
 	escExitFilter                  // 退出过滤模式回全量（药丸消失）
-	escQuitApp                     // 退出程序
+	escHideWindow                  // 隐藏窗口回托盘，进程驻留（退出程序走托盘菜单或 Ctrl+Q）
 )
 
 // escActionFor 按当前状态决定 Esc 应执行哪一层动作。
@@ -152,7 +153,7 @@ func escActionFor(popShown bool, text string, committed filterMode) escAction {
 	case committed != filterAll:
 		return escExitFilter
 	default:
-		return escQuitApp
+		return escHideWindow
 	}
 }
 
@@ -183,9 +184,10 @@ const spotlightCSS = `
   background-color: transparent;
 }
 
-/* ---------- 面板衬底：Spotlight 深色半透明面板 + 圆角 + 投影 ---------- */
-/* margin 留出投影空间：box-shadow 会被窗口表面边缘裁剪，
-   四周留 12px 透明环后阴影才能在合成器里显示出来。 */
+/* ---------- 面板衬底：Spotlight 深色半透明面板 + 圆角 + 多层柔和阴影 ---------- */
+/* margin 留出投影出界空间（阴影会被窗口表面边缘裁剪）；
+   三层外阴影由远及近：大范围低浓度（漂浮感）→ 中距离过渡 → 贴边落地，
+   再加 1px 细腻内描边与顶部内高光，模仿 macOS 的柔和漂浮质感。 */
 .spot-frame {
   --spot-fs-entry: 20px;
   --spot-fs-title: 15px;
@@ -194,8 +196,13 @@ const spotlightCSS = `
   --spot-fs-section: 12px;
   background-color: @spot_bg;
   border-radius: 14px;
-  box-shadow: 0 6px 28px rgba(0, 0, 0, 0.5);
-  margin: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 20px 48px rgba(0, 0, 0, 0.36),
+    0 8px 20px rgba(0, 0, 0, 0.30),
+    0 1px 3px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  margin: 14px;
 }
 
 /* ---------- 搜索行：上下留白，左侧放大镜、右侧设置入口 ---------- */
@@ -353,6 +360,8 @@ type Window struct {
 	cfg      *config.Config
 	listApps []apps.App // 启动时扫描的应用列表（只读）
 
+	settingsDlg *SettingsWindow // 当前设置对话框（非 nil 时置顶而不是新开）
+
 	items      []item
 	debounce   *time.Timer
 	generation uint64
@@ -366,9 +375,10 @@ func NewWindow(app *gtk.Application, cfg *config.Config, appList []apps.App) *Wi
 
 	window := gtk.NewApplicationWindow(app)
 	window.SetTitle("bao")
+	window.SetIconName("bao")      // 包子图标（packaging/assets/bao.svg 安装到 hicolor）
 	window.SetDecorated(false)     // Spotlight：无边框窗口
 	window.SetResizable(false)     // Spotlight：面板不可缩放
-	window.SetDefaultSize(704, -1) // 含衬底 12px 透明环；面板视觉宽度约 680px，高度取自然高度
+	window.SetDefaultSize(704, -1) // 含衬底 14px 透明环；面板视觉宽度约 680px，高度取自然高度
 	// 窗口位置说明：GTK4 起移除了 gtk_window_set_position；已 grep gotk4
 	// v0.4.1 模块缓存确认 gdk/v4、gdkwayland、gdkx11 中均不存在任何
 	// Toplevel/Surface 级别的移动 API（无 MoveSize/MoveToRect 等函数）。
@@ -381,17 +391,12 @@ func NewWindow(app *gtk.Application, cfg *config.Config, appList []apps.App) *Wi
 
 	// 设置入口收到搜索行尾部：小尺寸、低对比、无框（Spotlight 没有齿轮按钮，弱化处理）。
 	settingsBtn := gtk.NewButton()
-	settingsBtn.SetTooltipText("排除目录设置")
+	settingsBtn.SetTooltipText("设置")
 	settingsBtn.SetChild(gtk.NewImageFromIconName("emblem-system-symbolic"))
 	settingsBtn.SetHasFrame(false)
 	settingsBtn.SetVAlign(gtk.AlignCenter)
 	settingsBtn.AddCSSClass("spot-settings-btn")
-	settingsBtn.ConnectClicked(func() {
-		// 传副本给对话框：对话框就地修改并保存副本，保存成功后经 onConfigSaved 原子换入，
-		// 避免后台文件搜索遍历配置时与界面线程并发读写同一份切片。
-		cfg := w.currentConfig()
-		NewSettingsWindow(&window.Window, &config.Config{ExcludedDirs: cfg.AllExcluded()}, w.onConfigSaved)
-	})
+	settingsBtn.ConnectClicked(func() { w.OpenSettings() })
 
 	// 内层衬底：圆角半透明面板；窗口节点整体透明，
 	// 圆角外侧像素直接透出合成器，形成圆角窗口观感。
@@ -417,6 +422,9 @@ func NewWindow(app *gtk.Application, cfg *config.Config, appList []apps.App) *Wi
 	w.entry.SetVAlign(gtk.AlignCenter)
 	w.entry.AddCSSClass("spot-entry")
 	w.entry.ConnectChanged(func() { w.onQueryChanged() })
+	// 回车执行选中项：Entry 会把 Return 消费为 activate 信号、不再冒泡到
+	// 窗口级 KeyController，因此回车不能只依赖 onKeyPressed，这里必须接一份。
+	w.entry.ConnectActivate(func() { w.activateSelectedOrFirst() })
 
 	// 过滤模式提示药丸：放在搜索框左侧，仅过滤模式可见。
 	w.modeChip = gtk.NewLabel("")
@@ -429,8 +437,8 @@ func NewWindow(app *gtk.Application, cfg *config.Config, appList []apps.App) *Wi
 
 	searchRow.Append(settingsBtn)
 
-	// 过滤关键字下拉提醒：文本是关键字的非空前缀时在搜索框下方弹出候选，
-	// Tab/点击候选把文本补全为「关键字+空格」。Popover 是非模态浮层，与
+	// 过滤关键字下拉提醒：文本是关键字的严格非空前缀时在搜索框下方弹出候选，
+	// Tab/点击候选提交过滤模式并清空输入框。Popover 是非模态浮层，与
 	// 结果列表相互独立；弹出状态由代码自行维护（SetAutohide(false)）。
 	w.filterPop = gtk.NewPopover()
 	w.filterPop.SetParent(w.entry)
@@ -502,6 +510,35 @@ func (w *Window) Present() {
 	if w.entry.Text() != "" {
 		w.entry.SelectRegion(0, -1)
 	}
+}
+
+// Toggle 切换主窗口可见性：可见则隐藏，隐藏则显示并聚焦
+// （系统托盘左键 Activate 与右键菜单「显示/隐藏」用）。
+func (w *Window) Toggle() {
+	if w.win.IsVisible() {
+		w.win.SetVisible(false)
+		return
+	}
+	w.Present()
+}
+
+// Close 关闭主窗口（托盘「退出」菜单用；最后一个窗口关闭后应用退出）。
+func (w *Window) Close() {
+	w.win.Close()
+}
+
+// OpenSettings 打开设置对话框（搜索行齿轮与托盘菜单「设置」共用）：
+// 已存在则置顶，不重复开窗。传配置副本给对话框：对话框就地修改并保存
+// 副本，保存成功后经 onConfigSaved 原子换入，避免后台文件搜索遍历配置时
+// 与界面线程并发读写同一份切片。
+func (w *Window) OpenSettings() {
+	if w.settingsDlg != nil {
+		w.settingsDlg.win.Present()
+		return
+	}
+	cfg := w.currentConfig()
+	w.settingsDlg = NewSettingsWindow(&w.win.Window, &config.Config{ExcludedDirs: cfg.AllExcluded()}, w.onConfigSaved)
+	w.settingsDlg.win.ConnectDestroy(func() { w.settingsDlg = nil })
 }
 
 // currentConfig 返回当前配置指针。
@@ -704,7 +741,17 @@ func (w *Window) newRow(it item) *gtk.ListBoxRow {
 
 	box := gtk.NewBox(gtk.OrientationHorizontal, 12)
 
-	icon := gtk.NewImageFromIconName(it.icon)
+	// Icon 字段可能是图标名，也可能是绝对路径（如微信、腾讯会议的 .desktop），
+	// 绝对路径且文件存在时按文件加载，否则按图标名解析（含缺省占位）。
+	var icon *gtk.Image
+	if strings.HasPrefix(it.icon, "/") {
+		if _, err := os.Stat(it.icon); err == nil {
+			icon = gtk.NewImageFromFile(it.icon)
+		}
+	}
+	if icon == nil {
+		icon = gtk.NewImageFromIconName(it.icon)
+	}
 	icon.SetIconSize(gtk.IconSizeLarge)
 	icon.SetPixelSize(32)
 	icon.SetVAlign(gtk.AlignCenter)
@@ -782,14 +829,15 @@ func (w *Window) updateRowHeader(row, before *gtk.ListBoxRow) {
 	header.SetVisible(true)
 }
 
-// onKeyPressed 处理全局按键：回车执行、Esc 分层退出、上下移动选中。
+// onKeyPressed 处理全局按键：回车执行、Esc 分层隐藏、Ctrl+Q 退出、上下移动选中。
 func (w *Window) onKeyPressed(keyval, keycode uint, state gdk.ModifierType) bool {
 	switch keyval {
 	case gdk.KEY_Return, gdk.KEY_KP_Enter:
 		w.activateSelectedOrFirst()
 		return true
 	case gdk.KEY_Escape:
-		// 分层退出：关候选下拉 → 清文本（停留当前模式）→ 退出过滤模式回全量 → 退出程序。
+		// 分层退出：关候选下拉 → 清文本（停留当前模式）→ 退出过滤模式回全量 →
+		// 隐藏窗口回托盘（进程驻留；退出程序只能走托盘菜单或 Ctrl+Q）。
 		switch escActionFor(w.filterPopShown, w.entry.Text(), w.committed) {
 		case escClosePopup:
 			w.hideFilterPopup()
@@ -798,10 +846,16 @@ func (w *Window) onKeyPressed(keyval, keycode uint, state gdk.ModifierType) bool
 		case escExitFilter:
 			w.committed = filterAll
 			w.updateModeChip(filterAll)
-		case escQuitApp:
-			w.win.Close()
+		case escHideWindow:
+			w.win.SetVisible(false)
 		}
 		return true
+	case gdk.KEY_q:
+		if state&gdk.ControlMask != 0 {
+			w.win.Close()
+			return true
+		}
+		return false
 	case gdk.KEY_Up:
 		w.moveSelection(-1)
 		return true
@@ -854,7 +908,11 @@ func (w *Window) activateIndex(idx int) {
 		w.entry.Display().Clipboard().SetText(it.value)
 	case kindApp:
 		app := it.app
-		go func() { _ = apps.Launch(app) }()
+		go func() {
+			if err := apps.Launch(app); err != nil {
+				fmt.Fprintln(os.Stderr, "启动应用失败:", app.Name, err)
+			}
+		}()
 		w.entry.SetText("")
 		w.win.SetVisible(false)
 	case kindFile:

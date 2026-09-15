@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=bao
+Exec=/usr/bin/bao-autostart
+Icon=bao
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

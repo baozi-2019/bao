@@ -1,0 +1,6 @@
+#!/bin/sh
+# 开机自启入口：尽力注册全局快捷键，然后以隐藏模式驻留 bao
+#（窗口不弹出，按 Super+空格 或运行 bao 唤起）。
+
+bao-keybind >/dev/null 2>&1 || true
+exec bao --hidden

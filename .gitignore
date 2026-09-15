@@ -1,7 +1,10 @@
 # 编译产物
-/bao        # go build -o bao . 输出的可执行文件
-*.test      # go test 生成的测试二进制
-*.out       # 测试覆盖率等输出
+# go build -o bao . 输出的可执行文件
+/bao
+# packaging/build-deb.sh 输出的 deb 包
+/dist/
+*.test
+*.out
 
 # 编辑器与系统文件
 .idea/

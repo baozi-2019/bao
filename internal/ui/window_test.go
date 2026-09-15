@@ -68,7 +68,7 @@ func TestResolveFilter(t *testing.T) {
 	}
 }
 
-// TestEscActionFor 覆盖 Esc 分层退出的前置条件：下拉 → 清文本 → 退出模式 → 退出程序。
+// TestEscActionFor 覆盖 Esc 分层退出的前置条件：下拉 → 清文本 → 退出模式 → 隐藏窗口回托盘。
 func TestEscActionFor(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -83,7 +83,7 @@ func TestEscActionFor(t *testing.T) {
 		{"模式内有文本清文本停留模式", false, "term", filterApps, escClearText},
 		{"模式内空白文本清文本", false, "  ", filterFiles, escClearText},
 		{"模式空文本退到全量", false, "", filterApps, escExitFilter},
-		{"全量空文本退出程序", false, "", filterAll, escQuitApp},
+		{"全量空文本隐藏窗口驻留托盘", false, "", filterAll, escHideWindow},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

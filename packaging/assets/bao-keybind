@@ -1,0 +1,35 @@
+#!/bin/sh
+# 为 bao 注册 GNOME 全局快捷键（默认 Super+空格），幂等执行。
+# 非 GNOME 环境退出码 1 并提示手动绑定。
+
+set -u
+
+SCHEMA=org.gnome.settings-daemon.plugins.media-keys
+BASE=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/bao/
+
+if ! command -v gsettings >/dev/null 2>&1; then
+  echo "未找到 gsettings：请在系统设置中手动绑定快捷键启动 bao" >&2
+  exit 1
+fi
+
+cur=$(gsettings get "$SCHEMA" custom-keybindings 2>/dev/null) || {
+  echo "当前桌面不支持 GNOME media-keys：请手动绑定快捷键启动 bao" >&2
+  exit 1
+}
+
+case "$cur" in
+  *"$BASE"*) exit 0 ;;  # 已注册
+esac
+
+inner=$(printf '%s' "$cur" | sed -e 's/^\[//' -e 's/\]$//' -e 's/^ *//')
+if [ -n "$inner" ]; then
+  new="[$inner, '$BASE']"
+else
+  new="['$BASE']"
+fi
+
+gsettings set "$SCHEMA" custom-keybindings "$new"
+gsettings set "$SCHEMA.custom-keybinding:$BASE" name 'bao 启动器'
+gsettings set "$SCHEMA.custom-keybinding:$BASE" command 'bao'
+gsettings set "$SCHEMA.custom-keybinding:$BASE" binding '<Super>space'
+echo "已绑定 Super+空格 启动 bao（GNOME 设置 → 键盘 → 自定义快捷键 可修改）"
