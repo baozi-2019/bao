@@ -34,19 +34,19 @@ func Path() string {
 	return filepath.Join(home, ".config", appDirName, "config.json")
 }
 
-// DefaultExcluded 返回内置默认排除目录的副本，调用方可安全修改。
-// 回收站按当前用户主目录展开为绝对路径，以便按完整路径前缀匹配。
+// DefaultExcluded 返回内置默认排除目录的副本（按目录基名匹配，命中即整目录跳过）。
+// 只收录可见的构建产物类重目录；隐藏目录（.git/.cache 等）由文件遍历的隐藏项
+// 规则统一跳过，回收站位于 ~/.local 下同样不可达，二者均无须在此列出。
 func DefaultExcluded() []string {
-	dirs := []string{"node_modules", ".git", ".cache", ".npm", ".cargo"}
-	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".local", "share", "Trash"))
-	}
-	return dirs
+	return []string{"node_modules", "__pycache__", "target", "venv", "build", "dist"}
 }
 
 // Load 读取配置文件并返回配置。
 // 配置文件不存在（或内容为空）时返回默认配置且不报错；
 // JSON 损坏时返回错误。
+// 配置文件只存差量：excluded_dirs 为用户新增项，removed_defaults 为用户停用的
+// 内置默认项；加载时按（内置默认 - 停用项）∪ 新增项 还原有效列表。
+// 旧版配置曾把合并后的完整列表写入 excluded_dirs，按新增项处理结果一致。
 func Load() (*Config, error) {
 	data, err := os.ReadFile(Path())
 	if errors.Is(err, os.ErrNotExist) {
@@ -55,22 +55,45 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("读取配置文件: %w", err)
 	}
-	var user Config
+	var raw struct {
+		Added   []string `json:"excluded_dirs"`
+		Removed []string `json:"removed_defaults"`
+	}
 	if len(strings.TrimSpace(string(data))) > 0 {
-		if err := json.Unmarshal(data, &user); err != nil {
+		if err := json.Unmarshal(data, &raw); err != nil {
 			return nil, fmt.Errorf("解析配置文件 %s: %w", Path(), err)
 		}
 	}
-	return &Config{ExcludedDirs: mergeExcluded(DefaultExcluded(), user.ExcludedDirs)}, nil
+	removed := make(map[string]bool, len(raw.Removed))
+	for _, entry := range raw.Removed {
+		removed[normalizeEntry(entry)] = true
+	}
+	active := make([]string, 0, len(DefaultExcluded()))
+	for _, entry := range DefaultExcluded() {
+		if !removed[entry] {
+			active = append(active, entry)
+		}
+	}
+	return &Config{ExcludedDirs: mergeExcluded(active, raw.Added)}, nil
 }
 
 // Save 将配置写回 Path()，文件权限收敛到 0600，父目录不存在时自动创建。
+// 写入的是差量表示：有效列表中属于内置默认的项不重复记录，缺失的默认项记入
+// removed_defaults，使"停用某个内置默认"可以被持久化。
 func (c *Config) Save() error {
 	path := Path()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("创建配置目录: %w", err)
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
+	defaults := DefaultExcluded()
+	payload := struct {
+		Added   []string `json:"excluded_dirs"`
+		Removed []string `json:"removed_defaults"`
+	}{
+		Added:   setDiff(c.ExcludedDirs, defaults),
+		Removed: setDiff(defaults, c.ExcludedDirs),
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化配置: %w", err)
 	}
@@ -83,6 +106,26 @@ func (c *Config) Save() error {
 		return fmt.Errorf("设置配置文件权限: %w", err)
 	}
 	return nil
+}
+
+// setDiff 返回 a - b：按 a 的顺序输出规范化去重后的元素，规范化后等于 b 中
+// 某项的一律剔除。
+func setDiff(a, b []string) []string {
+	banned := make(map[string]bool, len(b))
+	for _, entry := range b {
+		banned[normalizeEntry(entry)] = true
+	}
+	seen := make(map[string]bool, len(a))
+	out := make([]string, 0, len(a))
+	for _, entry := range a {
+		entry = normalizeEntry(entry)
+		if entry == "" || banned[entry] || seen[entry] {
+			continue
+		}
+		seen[entry] = true
+		out = append(out, entry)
+	}
+	return out
 }
 
 // IsExcluded 报告 name（条目基名）或 fullPath（完整路径）是否命中排除列表：
