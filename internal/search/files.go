@@ -5,7 +5,6 @@ import (
 	"context"
 	"io/fs"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"bao/internal/fuzzy"
@@ -68,14 +67,6 @@ func Files(ctx context.Context, root, query string, exclude func(name, fullPath 
 		return nil
 	})
 
-	sort.Slice(results, func(i, j int) bool {
-		if results[i].Score != results[j].Score {
-			return results[i].Score > results[j].Score
-		}
-		if results[i].Name != results[j].Name {
-			return results[i].Name < results[j].Name
-		}
-		return results[i].Path < results[j].Path
-	})
+	sortResults(results)
 	return results
 }

@@ -3,7 +3,7 @@
 # 产物：dist/bao_<VERSION>_amd64.deb
 set -eu
 
-VERSION=0.2.1
+VERSION=0.4.0
 REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST="$REPO/dist"
 STAGE=$(mktemp -d)

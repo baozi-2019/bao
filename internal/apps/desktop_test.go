@@ -3,6 +3,7 @@ package apps
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -111,6 +112,48 @@ Name=Only System
 	}
 	if len(apps) != 2 {
 		t.Fatalf("同名系统应用应被去重: %+v", apps)
+	}
+}
+
+// TestSearchPreparedParity 验证 Scan 解析出的应用（预计算快速路径）与手工构造的
+// 同名应用（fuzzy.Match 退化路径）在 Search 下返回完全一致的排序结果。
+// 目标均不含驼峰大小写（非 ASCII 查询的 matchRunes 退化仅影响驼峰边界加分）。
+func TestSearchPreparedParity(t *testing.T) {
+	user, _ := xdgEnv(t)
+	writeDesktop(t, filepath.Join(user, "fire.desktop"), `
+[Desktop Entry]
+Name=Firefox
+Comment=Web browser
+`)
+	writeDesktop(t, filepath.Join(user, "files.desktop"), `
+[Desktop Entry]
+Name=File Manager
+Comment=管理文件与目录
+`)
+	writeDesktop(t, filepath.Join(user, "term.desktop"), `
+[Desktop Entry]
+Name=Terminal
+Comment=命令行终端
+`)
+
+	scanned := Scan()
+	manual := make([]App, len(scanned))
+	for i, a := range scanned {
+		manual[i] = App{Name: a.Name, Comment: a.Comment, ID: a.ID, NoDisplay: a.NoDisplay}
+	}
+	ids := func(list []App) []string {
+		out := make([]string, len(list))
+		for i, a := range list {
+			out[i] = a.ID
+		}
+		return out
+	}
+	for _, q := range []string{"f", "fire", "文件", "term", "xyz", ""} {
+		got := ids(Search(scanned, q, 10))
+		want := ids(Search(manual, q, 10))
+		if !slices.Equal(got, want) {
+			t.Errorf("query %q: 预计算路径与退化路径结果不一致:\n got %v\nwant %v", q, got, want)
+		}
 	}
 }
 

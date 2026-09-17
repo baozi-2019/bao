@@ -27,12 +27,17 @@ import (
 )
 
 const (
-	// debounceDelay 是输入防抖时长：停止输入这么久后才真正发起搜索。
-	debounceDelay = 150 * time.Millisecond
+	// debounceDelay 是输入防抖时长：文件索引让单次过滤纯内存化（毫秒级），
+	// 可以承受更密的触发，打字跟手感更好。
+	debounceDelay = 80 * time.Millisecond
 	// maxApps 是应用结果上限。
 	maxApps = 20
 	// maxFiles 是文件结果上限。
 	maxFiles = 100
+	// maxRecent 是「最近使用文件」置顶条数。
+	maxRecent = 5
+	// cacheMaxAge 是文件索引的保鲜时长，超时后窗口唤起时后台重建。
+	cacheMaxAge = 2 * time.Minute
 )
 
 // itemKind 标识结果列表中一条结果的类型。
@@ -366,6 +371,10 @@ type Window struct {
 	debounce   *time.Timer
 	generation uint64
 	cancel     context.CancelFunc
+
+	cacheMu    sync.Mutex    // 保护下面的缓存字段；持锁期间只允许再取 w.mu（顺序 cacheMu→w.mu）
+	cache      *search.Cache // 文件索引；nil = 未就绪或已失效
+	cacheBuild bool          // 索引构建进行中（防止重复触发）
 }
 
 // NewWindow 创建主窗口并装配控件。
@@ -503,8 +512,10 @@ func NewWindow(app *gtk.Application, cfg *config.Config, appList []apps.App) *Wi
 	return w
 }
 
-// Present 显示窗口、聚焦搜索框并选中已有输入。
+// Present 显示窗口、聚焦搜索框并选中已有输入；顺带按需预热文件索引
+// （无缓存、超时或排除配置变更时后台重建，重复调用为空操作）。
 func (w *Window) Present() {
+	w.maybeWarmCache()
 	w.win.Present()
 	w.entry.GrabFocus()
 	if w.entry.Text() != "" {
@@ -548,11 +559,70 @@ func (w *Window) currentConfig() *config.Config {
 	return w.cfg
 }
 
-// onConfigSaved 在设置对话框写回配置后调用：替换配置并立即重搜当前输入。
+// maybeWarmCache 按需触发文件索引后台构建：缓存缺失、超过保鲜时长或排除配置
+// 快照不一致时重建，构建期间重复调用为空操作。窗口每次唤起（Present）时调用。
+func (w *Window) maybeWarmCache() {
+	w.cacheMu.Lock()
+	if w.cacheBuild {
+		w.cacheMu.Unlock()
+		return
+	}
+	c := w.cache
+	if c != nil && c.Age() < cacheMaxAge && c.MatchesConfig(w.currentConfig().AllExcluded()) {
+		w.cacheMu.Unlock()
+		return
+	}
+	w.cacheBuild = true
+	w.cacheMu.Unlock()
+
+	go func() {
+		cfg := w.currentConfig()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			w.finishCacheBuild(nil)
+			return
+		}
+		entries := search.Build(context.Background(), home, cfg.IsExcluded)
+		w.finishCacheBuild(search.NewCache(entries, cfg.AllExcluded()))
+	}()
+}
+
+// finishCacheBuild 在索引构建完成后换入缓存；配置在构建期间被修改的快照直接作废。
+func (w *Window) finishCacheBuild(c *search.Cache) {
+	w.cacheMu.Lock()
+	defer w.cacheMu.Unlock()
+	w.cacheBuild = false
+	if c != nil && c.MatchesConfig(w.currentConfig().AllExcluded()) {
+		w.cache = c
+	}
+}
+
+// currentFileCache 返回可直接服务的索引缓存；未就绪、超时或与当前排除配置
+// 不一致时返回 nil（调用方回退到实时遍历，maybeWarmCache 会择机重建）。
+func (w *Window) currentFileCache() *search.Cache {
+	w.cacheMu.Lock()
+	defer w.cacheMu.Unlock()
+	c := w.cache
+	if c == nil {
+		return nil
+	}
+	if c.Age() >= cacheMaxAge || !c.MatchesConfig(w.currentConfig().AllExcluded()) {
+		return nil
+	}
+	return c
+}
+
+// onConfigSaved 在设置对话框写回配置后调用：替换配置、作废旧文件索引并立即重搜当前输入。
 func (w *Window) onConfigSaved(cfg *config.Config) {
 	w.mu.Lock()
 	w.cfg = cfg
 	w.mu.Unlock()
+
+	// 排除配置已变更：旧索引快照作废，Present 时按需重建。
+	w.cacheMu.Lock()
+	w.cache = nil
+	w.cacheMu.Unlock()
+	w.maybeWarmCache()
 
 	mode, query, _, _, doRewrite := resolveFilter(w.committed, w.entry.Text())
 	if doRewrite {
@@ -664,8 +734,9 @@ func (w *Window) acceptFilterRow(row *gtk.ListBoxRow) {
 }
 
 // runSearch 在后台 goroutine 中按过滤模式执行搜索：
-// 计算结果置顶（仅全量模式），其后是应用（全量/apps 模式），
-// 文件遍历最慢、结果稍后追加（全量/files 模式）。
+// 计算结果置顶（仅全量模式），其后是应用（全量/apps 模式）；
+// 文件一路优先走内存索引（最近使用文件置顶、按路径去重），索引未就绪时
+// 回退实时遍历，结果稍后追加（全量/files 模式）。
 // 任何一路的产出都通过 glib.IdleAdd 回灌主线程。
 func (w *Window) runSearch(ctx context.Context, query string, gen uint64, mode filterMode) {
 	items := make([]item, 0, maxApps+1)
@@ -697,7 +768,32 @@ func (w *Window) runSearch(ctx context.Context, query string, gen uint64, mode f
 	if err != nil {
 		return
 	}
-	files := search.Files(ctx, home, query, w.currentConfig().IsExcluded, maxFiles)
+	cfg := w.currentConfig()
+
+	// 文件一路：索引就绪走纯内存过滤（全局最优前 maxFiles 个），否则回退实时遍历。
+	var files []search.Result
+	if c := w.currentFileCache(); c != nil {
+		files = c.Filter(query, maxFiles)
+	} else {
+		files = search.Files(ctx, home, query, cfg.IsExcluded, maxFiles)
+	}
+	// 最近使用文件置顶：解析 xbel 仅几毫秒，两条路都适用；按路径去重。
+	if recent := search.Recent(home, query, maxRecent); len(recent) > 0 {
+		seen := make(map[string]bool, len(recent))
+		for _, r := range recent {
+			seen[r.Path] = true
+		}
+		kept := files[:0]
+		for _, f := range files {
+			if !seen[f.Path] {
+				kept = append(kept, f)
+			}
+		}
+		files = append(recent, kept...)
+		if len(files) > maxFiles {
+			files = files[:maxFiles]
+		}
+	}
 	glib.IdleAdd(func() { w.appendItems(gen, files) })
 }
 

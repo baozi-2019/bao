@@ -2,10 +2,11 @@
 package apps
 
 import (
+	"cmp"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"bao/internal/fuzzy"
@@ -19,6 +20,16 @@ type App struct {
 	Icon      string
 	ID        string // .desktop 文件完整路径
 	NoDisplay bool
+
+	// 搜索预计算形态（parseDesktop 填充，语义同 search.Entry）：查询期配合
+	// fuzzy.Matcher 做零分配匹配。lowerName 为零值表示手工构造的未预计算
+	// 实例，Search 对此退化为 fuzzy.Match。
+	lowerName    string // Name 的小写形态
+	boundName    uint64 // Name 的词首边界位图（fuzzy.BoundaryBitmap）
+	charsName    uint64 // Name 的字符存在位图（fuzzy.CharMask(lowerName)）
+	lowerComment string
+	boundComment uint64
+	charsComment uint64
 }
 
 // Scan 解析 XDG 应用目录中的全部 .desktop 文件。
@@ -69,16 +80,18 @@ func Scan() []App {
 
 // Search 在 list 中按 Name/Comment 做模糊匹配，返回至多 limit 个按得分降序的应用。
 // NoDisplay 应用仅在没有任何普通结果时作为兜底返回。
+// Scan 解析出的应用带预计算字段，单次查询只构建一次 Matcher 并走零分配快速路径；
+// 手工构造（预计算字段为零值）的实例逐条退化为 fuzzy.Match，行为与旧实现一致。
 func Search(list []App, query string, limit int) []App {
 	if limit <= 0 {
 		return nil
 	}
+	m := fuzzy.NewMatcher(query)
+	qlen := m.RuneLen()
+	qmask := m.Mask()
 	var normal, hidden []scoredApp
 	for _, a := range list {
-		score, ok := fuzzy.Match(query, a.Name)
-		if cs, ok2 := fuzzy.Match(query, a.Comment); ok2 && cs > score {
-			score, ok = cs, true
-		}
+		score, ok := a.match(m, qlen, qmask, query)
 		if !ok {
 			continue
 		}
@@ -88,12 +101,41 @@ func Search(list []App, query string, limit int) []App {
 			normal = append(normal, scoredApp{a, score})
 		}
 	}
-	sortByScore(normal)
+	byScore := func(x, y scoredApp) int { return cmp.Compare(y.score, x.score) }
+	slices.SortStableFunc(normal, byScore)
 	if len(normal) > 0 {
 		return take(normal, limit)
 	}
-	sortByScore(hidden)
+	slices.SortStableFunc(hidden, byScore)
 	return take(hidden, limit)
+}
+
+// match 返回 Name/Comment 模糊匹配的较高得分。预计算字段就绪时走长度 + 字符位图
+// 预筛与 MatchLower 打分（与 search.Cache 同一套语义，parity 由
+// fuzzy.TestMatcherParityWithMatch 保证）；lowerName 为零值（手工构造）时
+// 退化为 fuzzy.Match。
+func (a App) match(m fuzzy.Matcher, qlen int, qmask uint64, query string) (int, bool) {
+	if a.lowerName == "" {
+		ns, nok := fuzzy.Match(query, a.Name)
+		if cs, cok := fuzzy.Match(query, a.Comment); cok && cs > ns {
+			return cs, true
+		}
+		return ns, nok
+	}
+	ns, nok := matchPrepared(m, qlen, qmask, a.lowerName, a.boundName, a.charsName)
+	if cs, cok := matchPrepared(m, qlen, qmask, a.lowerComment, a.boundComment, a.charsComment); cok && cs > ns {
+		return cs, true
+	}
+	return ns, nok
+}
+
+// matchPrepared 先做长度与字符存在位图预筛，再执行 MatchLower；预筛无假阴性，
+// 打分语义与 fuzzy.Match 一致。
+func matchPrepared(m fuzzy.Matcher, qlen int, qmask uint64, lower string, bound, chars uint64) (int, bool) {
+	if len(lower) < qlen || qmask&^chars != 0 {
+		return 0, false
+	}
+	return m.MatchLower(lower, bound)
 }
 
 // Launch 通过 `gio launch <ID>` 启动应用。
@@ -105,11 +147,6 @@ func Launch(a App) error {
 type scoredApp struct {
 	app   App
 	score int
-}
-
-// sortByScore 按得分降序稳定排序。
-func sortByScore(list []scoredApp) {
-	sort.SliceStable(list, func(i, j int) bool { return list[i].score > list[j].score })
 }
 
 // take 取前 limit 个应用。
@@ -248,6 +285,13 @@ func parseDesktop(path string, locs []string) (App, bool) {
 	if v := pickLocalized(locComment, locs); v != "" {
 		app.Comment = v
 	}
+	// 填充搜索预计算形态（须在本地化覆盖 Name/Comment 之后）。
+	app.lowerName = strings.ToLower(app.Name)
+	app.boundName = fuzzy.BoundaryBitmap(app.Name)
+	app.charsName = fuzzy.CharMask(app.lowerName)
+	app.lowerComment = strings.ToLower(app.Comment)
+	app.boundComment = fuzzy.BoundaryBitmap(app.Comment)
+	app.charsComment = fuzzy.CharMask(app.lowerComment)
 	return app, true
 }
 
