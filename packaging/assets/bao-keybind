@@ -28,8 +28,12 @@ else
   new="['$BASE']"
 fi
 
-gsettings set "$SCHEMA" custom-keybindings "$new"
-gsettings set "$SCHEMA.custom-keybinding:$BASE" name 'bao 启动器'
-gsettings set "$SCHEMA.custom-keybinding:$BASE" command 'bao'
-gsettings set "$SCHEMA.custom-keybinding:$BASE" binding '<Super>space'
-echo "已绑定 Super+空格 启动 bao（GNOME 设置 → 键盘 → 自定义快捷键 可修改）"
+if gsettings set "$SCHEMA" custom-keybindings "$new" \
+  && gsettings set "$SCHEMA.custom-keybinding:$BASE" name 'bao 启动器' \
+  && gsettings set "$SCHEMA.custom-keybinding:$BASE" command 'bao' \
+  && gsettings set "$SCHEMA.custom-keybinding:$BASE" binding '<Super>space'; then
+  echo "已绑定 Super+空格 启动 bao（GNOME 设置 → 键盘 → 自定义快捷键 可修改）"
+else
+  echo "绑定失败：gsettings 写入出错，请在系统设置中手动绑定" >&2
+  exit 1
+fi

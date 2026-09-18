@@ -177,6 +177,10 @@ func mergeExcluded(defaults, user []string) []string {
 	return out
 }
 
+// NormalizeEntry 公开单条排除目录的规范化（去空白、展开 ~ 前缀、去结尾分隔符），
+// 供设置对话框写入内存前对齐 Load/Save 的语义，避免原样条目本会话不生效。
+func NormalizeEntry(entry string) string { return normalizeEntry(entry) }
+
 // normalizeEntry 清理单条排除配置：去除首尾空白、展开开头的 ~ 为用户主目录、
 // 去除结尾的路径分隔符（根目录 "/" 除外）。
 func normalizeEntry(entry string) string {

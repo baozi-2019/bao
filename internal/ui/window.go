@@ -537,9 +537,13 @@ func (w *Window) Toggle() {
 
 // Close 退出程序（托盘「退出」菜单与 Ctrl+Q 共用；最后一个窗口关闭后应用退出）。
 func (w *Window) Close() {
-	// 关于弹窗是独立窗口（非 transient），不随主窗口关闭，需一并销毁。
+	// 关于弹窗与隐藏态下打开的设置窗都是独立窗口（非 transient），
+	// 不随主窗口关闭，需一并销毁，否则残留窗口会阻止进程退出。
 	if w.aboutDlg != nil {
 		w.aboutDlg.Destroy()
+	}
+	if w.settingsDlg != nil {
+		w.settingsDlg.win.Destroy()
 	}
 	// 隐藏态主窗口未映射，gtk_window_close 对未映射窗口是空操作，
 	// 托盘「退出」会静默失败（进程驻留）；Destroy 才能可靠释放
@@ -1075,7 +1079,11 @@ func (w *Window) activateIndex(idx int) {
 		w.win.SetVisible(false)
 	case kindFile:
 		path := it.value
-		go func() { _ = exec.Command("gio", "open", path).Run() }()
+		go func() {
+			if err := exec.Command("gio", "open", path).Run(); err != nil {
+				log.Println("打开文件失败:", path, err)
+			}
+		}()
 		w.entry.SetText("")
 		w.win.SetVisible(false)
 	}

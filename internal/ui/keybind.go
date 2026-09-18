@@ -115,9 +115,13 @@ func unquoteGVariant(s string) string {
 func formatVariantStringArray(items []string) string {
 	quoted := make([]string, len(items))
 	for i, it := range items {
-		quoted[i] = "'" + strings.ReplaceAll(strings.ReplaceAll(it, `\`, `\\`), `'`, `\'`) + "'"
+		quoted[i] = "'" + escapeGVariant(it) + "'"
 	}
 	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
+func escapeGVariant(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `'`, `\'`)
 }
 
 // gsettings 执行一条 gsettings 命令并返回合并输出。
@@ -184,19 +188,25 @@ func KeybindSet(accel string) error {
 			return fmt.Errorf("解析 custom-keybindings 失败: %s", strings.TrimSpace(out))
 		}
 		list = append(list, keybindBase)
-		if _, err := gsettings("set", keybindSchema, "custom-keybindings", formatVariantStringArray(list)); err != nil {
-			return err
+		if out, err := gsettings("set", keybindSchema, "custom-keybindings", formatVariantStringArray(list)); err != nil {
+			return fmt.Errorf("写入 custom-keybindings: %w (%s)", err, strings.TrimSpace(out))
 		}
 	}
-	if _, err := gsettings("set", keybindSchemaPath(), "name", "'bao 启动器'"); err != nil {
-		return err
+	if out, err := gsettings("set", keybindSchemaPath(), "name", "'bao 启动器'"); err != nil {
+		return fmt.Errorf("写入 name: %w (%s)", err, strings.TrimSpace(out))
 	}
-	if _, err := gsettings("set", keybindSchemaPath(), "command", "'bao'"); err != nil {
-		return err
+	if out, err := gsettings("set", keybindSchemaPath(), "command", "'bao'"); err != nil {
+		return fmt.Errorf("写入 command: %w (%s)", err, strings.TrimSpace(out))
 	}
-	_, err := gsettings("set", keybindSchemaPath(), "binding", "'"+strings.ReplaceAll(accel, `'`, `\'`)+"'")
-	return err
+	out, err := gsettings("set", keybindSchemaPath(), "binding", "'"+escapeGVariant(accel)+"'")
+	if err != nil {
+		return fmt.Errorf("写入 binding: %w (%s)", err, strings.TrimSpace(out))
+	}
+	return nil
 }
+
+// escapeGVariant 转义 GVariant 字符串文本中的反斜杠与单引号（顺序不可换：
+// 先反斜杠后引号，否则已转义的反斜杠会被二次转义）。
 
 // KeybindResetDefault 恢复默认绑定 Super+空格。
 func KeybindResetDefault() error {

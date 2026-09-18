@@ -2,6 +2,7 @@ package calc
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -88,5 +89,19 @@ func TestLooksLikeMath(t *testing.T) {
 		if LooksLikeMath(s) {
 			t.Errorf("LooksLikeMath(%q) = true，期望 false", s)
 		}
+	}
+}
+
+// TestEvalDepthLimit 验证递归深度上限：正常嵌套可用，病态深嵌套
+// （粘贴海量括号/一元号）按非法处理，防递归栈耗尽。
+func TestEvalDepthLimit(t *testing.T) {
+	if v, ok := Eval(strings.Repeat("(", 10) + "1+2" + strings.Repeat(")", 10)); !ok || v != 3 {
+		t.Errorf("10 层嵌套应可求值为 3，得 %v %v", v, ok)
+	}
+	if v, ok := Eval(strings.Repeat("(", 1000) + "1" + strings.Repeat(")", 1000)); ok {
+		t.Errorf("1000 层嵌套应超深度上限返回非法，得 %v", v)
+	}
+	if v, ok := Eval(strings.Repeat("-", 5000) + "1"); ok {
+		t.Errorf("5000 层一元负号应超深度上限返回非法，得 %v", v)
 	}
 }

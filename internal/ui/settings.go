@@ -1,8 +1,6 @@
 package ui
 
 import (
-	"strings"
-
 	"github.com/diamondburned/gotk4/pkg/gdk/v4"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 	"github.com/diamondburned/gotk4/pkg/pango"
@@ -35,8 +33,13 @@ func NewSettingsWindow(parent *gtk.Window, cfg *config.Config, onSaved func(*con
 
 	win := gtk.NewWindow()
 	win.SetTitle("设置")
-	win.SetTransientFor(parent)
-	win.SetModal(true)
+	// 仅主窗口可见时挂 transient/modal：隐藏态（托盘入口）父窗口未映射，
+	// Wayland 下子窗口定位会贴屏幕边缘（与关于弹窗同坑）；
+	// 此时做独立窗口由合成器居中。非 transient 时由 Window.Close 一并销毁。
+	if parent.IsVisible() {
+		win.SetTransientFor(parent)
+		win.SetModal(true)
+	}
 	win.SetDefaultSize(520, 640)
 	win.SetResizable(false)
 	s.win = win
@@ -278,14 +281,14 @@ func (s *SettingsWindow) refresh() {
 	}
 }
 
-// addEntry 新增一条排除目录：去空白、去重后立即保存。
+// addEntry 新增一条排除目录：规范化（与 Load/Save 同一语义）去空白、去重后立即保存。
 func (s *SettingsWindow) addEntry() {
-	dir := strings.TrimSpace(s.entry.Text())
+	dir := config.NormalizeEntry(s.entry.Text())
 	s.entry.SetText("")
 	if dir == "" {
 		return
 	}
-	for _, e := range s.cfg.AllExcluded() {
+	for _, e := range s.cfg.ExcludedDirs {
 		if e == dir {
 			return
 		}
@@ -306,9 +309,16 @@ func (s *SettingsWindow) removeEntry(dir string) {
 	s.save()
 }
 
-// save 写回配置文件并通知主窗口；写盘失败时仅刷新界面，不传播错误。
+// save 写回配置文件并通知主窗口；写盘失败时提示用户且不调 onSaved，
+// 避免「界面显示已保存、实际未落盘」的静默分叉。
 func (s *SettingsWindow) save() {
-	if err := s.cfg.Save(); err == nil && s.onSaved != nil {
+	if err := s.cfg.Save(); err != nil {
+		s.showStatus("保存配置失败: " + err.Error())
+		s.refresh()
+		return
+	}
+	s.showStatus("")
+	if s.onSaved != nil {
 		s.onSaved(s.cfg)
 	}
 	s.refresh()

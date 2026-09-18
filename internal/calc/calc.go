@@ -26,6 +26,10 @@ import (
 // errInvalid 表示表达式非法：词法错误、语法错误或未知函数。
 var errInvalid = errors.New("非法表达式")
 
+// maxDepth 是解析递归深度上限：嵌套括号/一元号层数超过即视为非法，
+// 防止粘贴病态长串（海量嵌套）导致递归栈耗尽。
+const maxDepth = 512
+
 // Eval 严格模式求值：整串 expr（忽略空白）必须是合法表达式，
 // 返回其数值。任何错误或非有限结果都返回 ok == false。
 func Eval(expr string) (value float64, ok bool) {
@@ -131,10 +135,20 @@ func lex(s string) ([]token, error) {
 	return append(tokens, token{kind: tokEOF}), nil
 }
 
-// parser 是对 token 流做递归下降解析的游标。
+// parser 是对 token 流做递归下降解析的游标；depth 记录当前嵌套深度。
 type parser struct {
 	tokens []token
 	pos    int
+	depth  int
+}
+
+// enter 进入一层递归；超过 maxDepth 返回 errInvalid。
+func (p *parser) enter() error {
+	p.depth++
+	if p.depth > maxDepth {
+		return errInvalid
+	}
+	return nil
 }
 
 func (p *parser) peek() token { return p.tokens[p.pos] }
@@ -200,6 +214,10 @@ func (p *parser) parseTerm() (float64, error) {
 
 // parseUnary 解析一元正负号，可嵌套：--5 == 5。
 func (p *parser) parseUnary() (float64, error) {
+	if err := p.enter(); err != nil {
+		return 0, err
+	}
+	defer func() { p.depth-- }()
 	if p.atOp("-") || p.atOp("+") {
 		op := p.next().text
 		v, err := p.parseUnary()
@@ -234,6 +252,10 @@ func (p *parser) parseFactor() (float64, error) {
 
 // parsePrimary 解析数字、函数调用或括号表达式。
 func (p *parser) parsePrimary() (float64, error) {
+	if err := p.enter(); err != nil {
+		return 0, err
+	}
+	defer func() { p.depth-- }()
 	t := p.peek()
 	switch t.kind {
 	case tokNum:
