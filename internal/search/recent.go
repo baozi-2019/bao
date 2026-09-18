@@ -45,7 +45,8 @@ func Recent(home, query string, limit int) []Result {
 			continue
 		}
 		if score, ok := m.MatchLower(lower, fuzzy.BoundaryBitmap(name)); ok {
-			hits = append(hits, hit{Result: Result{Path: p, Name: name, Score: score}, stamp: b.Modified})
+			r := Result{Path: p, Name: name, Score: score}
+			hits = append(hits, hit{Result: r, stamp: b.Modified})
 		}
 	}
 	if len(hits) == 0 {

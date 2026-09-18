@@ -108,11 +108,12 @@ func desktopEntrySetHidden(content string, hidden bool) string {
 		}
 		out = append(out, "[Desktop Entry]", "Hidden=true")
 	}
-	result := strings.Join(out, "\n")
-	if !strings.HasSuffix(result, "\n") {
-		result += "\n"
+	var sb strings.Builder
+	sb.WriteString(strings.Join(out, "\n"))
+	if !strings.HasSuffix(sb.String(), "\n") {
+		sb.WriteString("\n")
 	}
-	return result
+	return sb.String()
 }
 
 // AutostartEnabled 读取用户文件与系统文件，返回当前自启是否生效。

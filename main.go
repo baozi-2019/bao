@@ -3,7 +3,7 @@
 package main
 
 import (
-	"fmt"
+	"log"
 	"os"
 
 	"github.com/diamondburned/gotk4/pkg/core/glib"
@@ -19,7 +19,7 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "配置加载失败，回退到默认配置:", err)
+		log.Println("配置加载失败，回退到默认配置:", err)
 		cfg = &config.Config{ExcludedDirs: config.DefaultExcluded()}
 	}
 
@@ -38,7 +38,7 @@ func main() {
 		args = append(args, a)
 	}
 
-	app := gtk.NewApplication("dev.bao.launcher", gio.ApplicationFlagsNone)
+	app := gtk.NewApplication("dev.bao.launcher", gio.ApplicationDefaultFlags)
 
 	var win *ui.Window
 	app.ConnectActivate(func() {
@@ -50,11 +50,12 @@ func main() {
 			// glib.IdleAdd 调度回 GTK 主线程。
 			tray, err := sni.New("bao 启动器", "bao")
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "系统托盘初始化失败（不影响使用）:", err)
+				log.Println("系统托盘初始化失败（不影响使用）:", err)
 			} else {
 				tray.OnActivate(func() { glib.IdleAdd(func() { win.Toggle() }) })
 				tray.OnToggle(func() { glib.IdleAdd(func() { win.Toggle() }) })
 				tray.OnSettings(func() { glib.IdleAdd(func() { win.OpenSettings() }) })
+				tray.OnAbout(func() { glib.IdleAdd(func() { win.OpenAbout() }) })
 				tray.OnQuit(func() { glib.IdleAdd(func() { win.Close() }) })
 			}
 		}

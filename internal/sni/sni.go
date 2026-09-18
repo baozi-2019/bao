@@ -42,12 +42,11 @@ var iconFiles = []string{
 }
 
 const (
-	// itemPath 是 SNI 项导出的 D-Bus 对象路径（本仓库自定义路径）。
-	itemPath = dbus.ObjectPath("/org/bao/StatusNotifierItem")
-	// defaultItemPath 是 SNI 协议的惯例默认对象路径：
-	// 以总线名向 watcher 注册时，宿主会到该路径读取属性与信号
-	// （ubuntu-appindicators 的 DEFAULT_ITEM_OBJECT_PATH 即此），必须同时导出。
-	defaultItemPath = dbus.ObjectPath("/StatusNotifierItem")
+	// itemPath 是 SNI 项导出的 D-Bus 对象路径，取协议惯例默认路径
+	// （ubuntu-appindicators 的 DEFAULT_ITEM_OBJECT_PATH）：以总线名向 watcher
+	// 注册时宿主到该路径读取属性与信号，扩展的 busAnalyzer 兜底扫描也依赖
+	// 默认路径才能正确识别项，故不再导出额外自定义路径。
+	itemPath = dbus.ObjectPath("/StatusNotifierItem")
 	// menuPath 是右键菜单（dbusmenu）导出的对象路径。
 	menuPath = dbus.ObjectPath("/org/bao/Menu")
 
@@ -108,7 +107,7 @@ type groupProps struct {
 }
 
 // Tray 是一个系统托盘项：左键触发 onActivate，右键弹出
-// 「显示/隐藏」「设置」「退出」菜单。零值不可用，必须用 New 创建。
+// 「显示/隐藏」「设置」「关于」「退出」菜单。零值不可用，必须用 New 创建。
 type Tray struct {
 	conn     *dbus.Conn
 	busName  string // 本进程持有的总线名（注册时告知 watcher）
@@ -120,17 +119,21 @@ type Tray struct {
 	onActivate func()
 	onToggle   func()
 	onSettings func()
+	onAbout    func()
 	onQuit     func()
 	closed     bool
-	retried    bool // watcher 缺失时是否已经重试过
+	registered bool          // 与 watcher 的注册是否成功
+	retrying   bool          // 退避重试 goroutine 是否在跑
+	stopCh     chan struct{} // Close 时关闭，用于退出重试与监听 goroutine
 }
 
 // New 创建托盘项：连接 session bus、申请总线名、导出 SNI 对象与
 // 菜单对象，并向 org.kde.StatusNotifierWatcher 注册。
 // title 为悬停提示文字，iconName 为主题图标名（IconName 属性，
 // 供已安装 bao.svg 图标主题的环境使用）；图标数据用内嵌的
-// iconPNGs（全部尺寸，IconPixmap 属性按尺寸全量提供，无主题图标时兜底）。
-// watcher 不存在时不视为致命错误：打印提示、10 秒后重试一次。
+// iconFS（全部尺寸，IconPixmap 属性按尺寸全量提供，无主题图标时兜底）。
+// watcher 不存在或注册失败不视为致命错误：后台退避重试，且监听 watcher
+// 总线名的 NameOwnerChanged，在其重新出现（扩展重载/shell 重启）后自动重注册。
 func New(title, iconName string) (*Tray, error) {
 	conn, err := dbus.SessionBus()
 	if err != nil {
@@ -169,6 +172,7 @@ func New(title, iconName string) (*Tray, error) {
 		title:    title,
 		iconName: iconName,
 		pixmaps:  pixmaps,
+		stopCh:   make(chan struct{}),
 	}
 
 	// SNI 项对象与属性接口：同时导出到自定义路径与协议默认路径
@@ -186,19 +190,17 @@ func New(title, iconName string) (*Tray, error) {
 	introspectMethods := map[string]any{
 		"Introspect": t.Introspect,
 	}
-	for _, path := range []dbus.ObjectPath{itemPath, defaultItemPath} {
-		if err := conn.ExportMethodTable(itemMethods, path, itemIface); err != nil {
-			conn.Close()
-			return nil, err
-		}
-		if err := conn.ExportMethodTable(propsMethods, path, propsIface); err != nil {
-			conn.Close()
-			return nil, err
-		}
-		if err := conn.ExportMethodTable(introspectMethods, path, introspectIface); err != nil {
-			conn.Close()
-			return nil, err
-		}
+	if err := conn.ExportMethodTable(itemMethods, itemPath, itemIface); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if err := conn.ExportMethodTable(propsMethods, itemPath, propsIface); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if err := conn.ExportMethodTable(introspectMethods, itemPath, introspectIface); err != nil {
+		conn.Close()
+		return nil, err
 	}
 	// 菜单（dbusmenu）对象。
 	if err := conn.ExportMethodTable(map[string]any{
@@ -220,43 +222,110 @@ func New(title, iconName string) (*Tray, error) {
 		return nil, err
 	}
 
+	// 监听 watcher 总线名的归属变化：AppIndicator 扩展禁用/重载会销毁全部托盘项
+	// 并依赖应用自行重注册（wechat/flameshot 等 libappindicator 客户端均如此），
+	// 不监听则一次 shell/扩展重载就会让图标永久丢失。
+	if err := conn.AddMatchSignal(
+		dbus.WithMatchObjectPath("/org/freedesktop/DBus"),
+		dbus.WithMatchInterface("org.freedesktop.DBus"),
+		dbus.WithMatchMember("NameOwnerChanged"),
+		dbus.WithMatchArg(0, watcherDest),
+	); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("订阅 watcher 名称变化: %w", err)
+	}
+	sigCh := make(chan *dbus.Signal, 16)
+	conn.Signal(sigCh)
+	go t.watchWatcher(sigCh)
+
 	t.register()
 	return t, nil
 }
 
-// register 向 watcher 注册本托盘项；watcher 不存在时打印提示，
-// 10 秒后重试一次（仅一次，不常驻重试）。
+// register 向 watcher 注册本托盘项：失败时启动退避重试
+// （200ms 起翻倍、封顶 10s），watcher 消失又出现时由 watchWatcher 再次触发。
 func (t *Tray) register() {
 	t.mu.Lock()
-	if t.closed {
+	if t.closed || t.registered || t.retrying {
 		t.mu.Unlock()
 		return
 	}
-	retried := t.retried
+	t.retrying = true
 	t.mu.Unlock()
+	go t.registerLoop()
+}
 
+// registerLoop 持续重试注册直到成功或 Close。
+func (t *Tray) registerLoop() {
+	delay := 200 * time.Millisecond
+	for {
+		if t.tryRegister() {
+			t.mu.Lock()
+			t.registered = true
+			t.retrying = false
+			t.mu.Unlock()
+			return
+		}
+		select {
+		case <-t.stopCh:
+			t.mu.Lock()
+			t.retrying = false
+			t.mu.Unlock()
+			return
+		case <-time.After(delay):
+		}
+		if delay < 10*time.Second {
+			delay *= 2
+		}
+	}
+}
+
+// tryRegister 向 watcher 发一次注册请求；成功后广播图标与提示刷新信号
+// （部分宿主依赖首次信号拉取图标）。
+func (t *Tray) tryRegister() bool {
 	call := t.conn.Object(watcherDest, watcherPath).
 		Call(watcherIface+".RegisterStatusNotifierItem", 0, t.busName)
-	if call.Err == nil {
-		// 注册成功后广播图标与提示刷新信号（部分宿主依赖首次信号拉取图标）；
-		// 两个路径都发，宿主代理绑定在哪个路径都能收到。
-		for _, path := range []dbus.ObjectPath{itemPath, defaultItemPath} {
-			_ = t.conn.Emit(path, itemIface+".NewIcon")
-			_ = t.conn.Emit(path, itemIface+".NewToolTip")
-		}
-		_ = t.conn.Emit(menuPath, menuIface+".LayoutUpdated", uint32(1), int32(0))
-		return
+	if call.Err != nil {
+		return false
 	}
+	// 广播失败说明连接已异常，视为注册失败交给重试循环接管。
+	if err := t.conn.Emit(itemPath, itemIface+".NewIcon"); err != nil {
+		return false
+	}
+	if err := t.conn.Emit(itemPath, itemIface+".NewToolTip"); err != nil {
+		return false
+	}
+	return t.conn.Emit(menuPath, menuIface+".LayoutUpdated", uint32(1), int32(0)) == nil
+}
 
-	if !retried {
-		t.mu.Lock()
-		t.retried = true
-		t.mu.Unlock()
-		fmt.Fprintf(os.Stderr, "系统托盘：%v；10 秒后重试一次\n", call.Err)
-		time.AfterFunc(10*time.Second, t.register)
-		return
+// watchWatcher 监听 watcher 总线名的 NameOwnerChanged：名称失去所有者
+// （扩展禁用/shell 重启）时标记未注册，重新获得所有者时触发重注册。
+func (t *Tray) watchWatcher(ch chan *dbus.Signal) {
+	for {
+		select {
+		case <-t.stopCh:
+			return
+		case sig, ok := <-ch:
+			if !ok {
+				return
+			}
+			if sig.Name != "org.freedesktop.DBus.NameOwnerChanged" || len(sig.Body) != 3 {
+				continue
+			}
+			name, _ := sig.Body[0].(string)
+			if name != watcherDest {
+				continue
+			}
+			owner, _ := sig.Body[2].(string)
+			if owner == "" {
+				t.mu.Lock()
+				t.registered = false
+				t.mu.Unlock()
+				continue
+			}
+			t.register()
+		}
 	}
-	fmt.Fprintf(os.Stderr, "系统托盘：重试后仍无法注册（%v），本次运行无托盘图标\n", call.Err)
 }
 
 // OnActivate 设置左键点击托盘图标时的回调。
@@ -280,6 +349,13 @@ func (t *Tray) OnSettings(fn func()) {
 	t.onSettings = fn
 }
 
+// OnAbout 设置右键菜单「关于」被点击时的回调。
+func (t *Tray) OnAbout(fn func()) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.onAbout = fn
+}
+
 // OnQuit 设置右键菜单「退出」被点击时的回调。
 func (t *Tray) OnQuit(fn func()) {
 	t.mu.Lock()
@@ -295,6 +371,7 @@ func (t *Tray) Close() error {
 		return nil
 	}
 	t.closed = true
+	close(t.stopCh)
 	t.mu.Unlock()
 	return t.conn.Close()
 }
@@ -401,17 +478,19 @@ func filterProps(props map[string]dbus.Variant, names []string) map[string]dbus.
 	return out
 }
 
-// layoutTree 构造完整菜单布局：根节点下挂「显示/隐藏」「设置」「退出」三个扁平项。
+// layoutTree 构造完整菜单布局：根节点下挂「显示/隐藏」「设置」「关于」「退出」四个扁平项。
 func layoutTree(names []string) menuLayout {
 	toggle := menuLayout{Id: 1, Properties: filterProps(menuItemProps("显示/隐藏"), names), Children: []dbus.Variant{}}
 	settings := menuLayout{Id: 2, Properties: filterProps(menuItemProps("设置"), names), Children: []dbus.Variant{}}
-	quit := menuLayout{Id: 3, Properties: filterProps(menuItemProps("退出"), names), Children: []dbus.Variant{}}
+	about := menuLayout{Id: 3, Properties: filterProps(menuItemProps("关于"), names), Children: []dbus.Variant{}}
+	quit := menuLayout{Id: 4, Properties: filterProps(menuItemProps("退出"), names), Children: []dbus.Variant{}}
 	return menuLayout{
 		Id:         0,
 		Properties: filterProps(rootMenuProps(), names),
 		Children: []dbus.Variant{
 			dbus.MakeVariant(toggle),
 			dbus.MakeVariant(settings),
+			dbus.MakeVariant(about),
 			dbus.MakeVariant(quit),
 		},
 	}
@@ -429,7 +508,8 @@ func (t *Tray) GetGroupProperties(ids []int32, propertyNames []string) ([]groupP
 		0: rootMenuProps(),
 		1: menuItemProps("显示/隐藏"),
 		2: menuItemProps("设置"),
-		3: menuItemProps("退出"),
+		3: menuItemProps("关于"),
+		4: menuItemProps("退出"),
 	}
 	out := make([]groupProps, 0, len(ids))
 	for _, id := range ids {
@@ -473,6 +553,10 @@ func (t *Tray) Event(id int32, eventID string, data dbus.Variant, timestamp uint
 			t.onSettings()
 		}
 	case 3:
+		if t.onAbout != nil {
+			t.onAbout()
+		}
+	case 4:
 		if t.onQuit != nil {
 			t.onQuit()
 		}

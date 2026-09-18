@@ -41,10 +41,8 @@ func Files(ctx context.Context, root, query string, exclude func(name, fullPath 
 			isRoot = false
 			return nil
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if err := ctx.Err(); err != nil {
+			return err // ctx 取消：中止遍历，返回已收集结果
 		}
 
 		name := d.Name()

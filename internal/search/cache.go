@@ -69,10 +69,8 @@ func Build(ctx context.Context, root string, exclude func(name, fullPath string)
 			isRoot = false
 			return nil
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		name := d.Name()
 		if strings.HasPrefix(name, ".") {

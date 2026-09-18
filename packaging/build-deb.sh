@@ -1,16 +1,25 @@
 #!/bin/sh
 # 构建 bao 的 .deb 包：编译二进制 → 装配文件树 → dpkg-deb 打包。
 # 产物：dist/bao_<VERSION>_amd64.deb
+# 版本号以 git tag 为唯一事实源：当前提交必须有精确匹配的 tag 才能构建，
+# 避免脚本内硬编码 VERSION 与 tag 漂移（0.3.0 曾因此漏改）。
 set -eu
 
-VERSION=0.4.0
 REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$REPO"
+if ! VERSION=$(git describe --tags --exact-match 2>/dev/null); then
+  echo "错误：HEAD 没有精确匹配的 git tag，请先打 tag 再构建发布包" >&2
+  exit 1
+fi
+VERSION=${VERSION#v}
+
 DIST="$REPO/dist"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
-cd "$REPO"
-go build -o bao .
+# -s -w 裁剪符号表与 DWARF 调试信息，减小发布体积；
+# -X 注入版本号（关于对话框展示），与 tag 保持同一事实源。
+go build -ldflags "-s -w -X bao/internal/build.Version=$VERSION" -o bao .
 
 mkdir -p "$STAGE/DEBIAN" \
   "$STAGE/usr/bin" \
@@ -25,7 +34,8 @@ install -m 0644 packaging/assets/bao.desktop   "$STAGE/usr/share/applications/ba
 install -m 0644 packaging/assets/bao-autostart.desktop "$STAGE/etc/xdg/autostart/bao.desktop"
 install -m 0644 packaging/assets/bao.svg       "$STAGE/usr/share/icons/hicolor/scalable/apps/bao.svg"
 
-SIZE=$(du -sk "$STAGE" | cut -f1)
+# Installed-Size 只统计安装到系统的 usr/etc，不含 DEBIAN 元数据目录。
+SIZE=$(du -sk "$STAGE/usr" "$STAGE/etc" | awk '{s+=$1} END {print s}')
 cat > "$STAGE/DEBIAN/control" <<EOF
 Package: bao
 Version: $VERSION

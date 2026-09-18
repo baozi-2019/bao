@@ -69,7 +69,7 @@ func TestBoundaryBitmap(t *testing.T) {
 }
 
 func TestCharMask(t *testing.T) {
-	if CharMask("a")&CharMask("a") == 0 {
+	if CharMask("a")&(1<<(uint('a')&63)) == 0 {
 		t.Error("CharMask(a) 应包含 a 的位")
 	}
 	// 位图作用在「已小写」的串上：'A' 经 strings.ToLower 归一为 'a'（97%64=33），

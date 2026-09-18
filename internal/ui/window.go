@@ -5,7 +5,7 @@ package ui
 
 import (
 	"context"
-	"fmt"
+	"log"
 	"math"
 	"os"
 	"os/exec"
@@ -21,6 +21,7 @@ import (
 	"github.com/diamondburned/gotk4/pkg/pango"
 
 	"bao/internal/apps"
+	"bao/internal/build"
 	"bao/internal/calc"
 	"bao/internal/config"
 	"bao/internal/search"
@@ -366,6 +367,7 @@ type Window struct {
 	listApps []apps.App // 启动时扫描的应用列表（只读）
 
 	settingsDlg *SettingsWindow // 当前设置对话框（非 nil 时置顶而不是新开）
+	aboutDlg    *gtk.Window     // 当前关于对话框（非 nil 时置顶而不是新开）
 
 	items      []item
 	debounce   *time.Timer
@@ -533,9 +535,16 @@ func (w *Window) Toggle() {
 	w.Present()
 }
 
-// Close 关闭主窗口（托盘「退出」菜单用；最后一个窗口关闭后应用退出）。
+// Close 退出程序（托盘「退出」菜单与 Ctrl+Q 共用；最后一个窗口关闭后应用退出）。
 func (w *Window) Close() {
-	w.win.Close()
+	// 关于弹窗是独立窗口（非 transient），不随主窗口关闭，需一并销毁。
+	if w.aboutDlg != nil {
+		w.aboutDlg.Destroy()
+	}
+	// 隐藏态主窗口未映射，gtk_window_close 对未映射窗口是空操作，
+	// 托盘「退出」会静默失败（进程驻留）；Destroy 才能可靠释放
+	// ApplicationWindow 对 GApplication 的持有并退出进程。
+	w.win.Destroy()
 }
 
 // OpenSettings 打开设置对话框（搜索行齿轮与托盘菜单「设置」共用）：
@@ -550,6 +559,59 @@ func (w *Window) OpenSettings() {
 	cfg := w.currentConfig()
 	w.settingsDlg = NewSettingsWindow(&w.win.Window, &config.Config{ExcludedDirs: cfg.AllExcluded()}, w.onConfigSaved)
 	w.settingsDlg.win.ConnectDestroy(func() { w.settingsDlg = nil })
+}
+
+// OpenAbout 打开关于对话框（托盘菜单「关于」入口）：展示图标、版本号与
+// 软件简介；已存在则置顶，不重复开窗。版本号取 build.Version
+// （打包时由 git tag 经 ldflags 注入，本地构建为 dev）。
+func (w *Window) OpenAbout() {
+	if w.aboutDlg != nil {
+		w.aboutDlg.Present()
+		return
+	}
+	dlg := gtk.NewWindow()
+	dlg.SetTitle("关于 bao")
+	// 不做 transient/modal：托盘唤起时主窗口常处于隐藏态，Wayland 下
+	// 未映射父窗口的子窗口拿不到合理定位（会贴到屏幕边缘）；
+	// 独立窗口由合成器居中，关于弹窗也不需要模态约束。
+	dlg.SetResizable(false)
+
+	box := gtk.NewBox(gtk.OrientationVertical, 10)
+	box.SetMarginTop(28)
+	box.SetMarginBottom(20)
+	box.SetMarginStart(32)
+	box.SetMarginEnd(32)
+	dlg.SetChild(box)
+
+	icon := gtk.NewImageFromIconName("bao")
+	icon.SetPixelSize(72)
+	box.Append(icon)
+
+	name := gtk.NewLabel("bao 启动器")
+	name.AddCSSClass("title-2")
+	box.Append(name)
+
+	ver := build.Version
+	if ver == "dev" {
+		ver = "dev（本地未打包构建）"
+	}
+	version := gtk.NewLabel("版本 " + ver)
+	version.AddCSSClass("dim-label")
+	box.Append(version)
+
+	intro := gtk.NewLabel("Albert 风格的 GTK4 桌面启动器：\n应用与文件模糊搜索 + 表达式计算，\n全局快捷键唤起、系统托盘驻留。")
+	intro.SetJustify(gtk.JustifyCenter)
+	intro.AddCSSClass("dim-label")
+	box.Append(intro)
+
+	closeBtn := gtk.NewButtonWithLabel("关闭")
+	closeBtn.SetHAlign(gtk.AlignCenter)
+	closeBtn.ConnectClicked(func() { dlg.Destroy() })
+	box.Append(closeBtn)
+
+	w.aboutDlg = dlg
+	dlg.ConnectDestroy(func() { w.aboutDlg = nil })
+	dlg.Present()
 }
 
 // currentConfig 返回当前配置指针。
@@ -948,7 +1010,7 @@ func (w *Window) onKeyPressed(keyval, keycode uint, state gdk.ModifierType) bool
 		return true
 	case gdk.KEY_q:
 		if state&gdk.ControlMask != 0 {
-			w.win.Close()
+			w.Close()
 			return true
 		}
 		return false
@@ -1006,7 +1068,7 @@ func (w *Window) activateIndex(idx int) {
 		app := it.app
 		go func() {
 			if err := apps.Launch(app); err != nil {
-				fmt.Fprintln(os.Stderr, "启动应用失败:", app.Name, err)
+				log.Println("启动应用失败:", app.Name, err)
 			}
 		}()
 		w.entry.SetText("")
